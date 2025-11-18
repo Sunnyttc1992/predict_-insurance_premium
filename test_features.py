@@ -1,5 +1,5 @@
 import pandas as pd
-from features import FeatureEngineering
+from insurance_pricing.features import FeatureEngineering
 
 
 def main():
