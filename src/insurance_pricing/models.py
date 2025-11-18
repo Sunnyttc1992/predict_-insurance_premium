@@ -47,6 +47,15 @@ except Exception:  # pragma: no cover
     TPESampler = None
 
 
+def get_model_candidates(random_state: int = 42) -> Dict[str, BaseEstimator]:
+    """
+    Provide a lightweight registry of models for the training script.
+    Reuses the baseline specs so train.py can stay simple.
+    """
+    baseline = SafeBaselineModels(random_state=random_state)
+    return baseline._build_models()
+
+
 # --------------------------------------------------------------------
 # Metric utility
 # --------------------------------------------------------------------
