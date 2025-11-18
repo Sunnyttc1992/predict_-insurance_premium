@@ -5,16 +5,16 @@ from typing import Dict
 import numpy as np
 from sklearn.model_selection import train_test_split, KFold, cross_val_predict
 
-from insurance_pricing.config import (
+from .config import (
     TARGET_COL,
     RANDOM_STATE,
     TEST_SIZE,
     PROCESSED_DIR,
 )
-from insurance_pricing.data_loader import load_insurance_data
-from insurance_pricing.models import get_model_candidates
-from insurance_pricing.preprocessing import build_full_pipeline
-from insurance_pricing.evaluate import regression_metrics, summarize_results
+from .data_loader import load_insurance_data
+from .models import get_model_candidates
+from .preprocessing import build_full_pipeline
+from .evaluate import regression_metrics, summarize_results
 
 
 def train_and_select_model() -> None:
