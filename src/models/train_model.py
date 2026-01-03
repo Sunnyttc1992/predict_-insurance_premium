@@ -1,5 +1,4 @@
 import argparse
-import os
 import pandas as pd
 import numpy as np
 import joblib
@@ -16,7 +15,6 @@ from mlflow.tracking import MlflowClient
 import platform
 import sklearn
 from pathlib import Path
-from urllib.parse import urlparse
 
 # -----------------------------
 # Configure logging
@@ -32,24 +30,30 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/model_config.yaml",
-        help="Path to model_config.yaml (default: configs/model_config.yaml)",
+        default="/workspaces/End_to_end_insurance_price_predection/configs/model_config.yaml",
+        help="Path to model_config.yaml",
     )
     parser.add_argument(
         "--data",
         type=str,
-        default="data/processed/insurance_cleaned.csv",
-        help="Path to processed CSV dataset (default: data/processed/insurance_cleaned.csv)",
+        default="/workspaces/End_to_end_insurance_price_predection/data/processed/clean_insurance.csv",
+        help="Path to processed CSV dataset",
     )
     parser.add_argument(
         "--models-dir",
         type=str,
-        default="artifacts",
-        help="Directory to save trained model (default: artifacts)",
+        default="/workspaces/End_to_end_insurance_price_predection/models",
+        help="Directory to save trained model",
     )
-    parser.add_argument("--mlflow-tracking-uri", type=str, default=None, help="MLflow tracking URI")
+    parser.add_argument(
+        "--mlflow-tracking-uri",
+        type=str,
+        default=None,
+        help="MLflow tracking URI",
+    )
     return parser.parse_args()
 
+# -----------------------------
 # -----------------------------
 # Load model from config
 # -----------------------------
@@ -64,39 +68,21 @@ def get_model_instance(name, params):
         raise ValueError(f"Unsupported model: {name}")
     return model_map[name](**params)
 
-def configure_mlflow(model_cfg, tracking_uri_arg):
-    tracking_uri = tracking_uri_arg or os.getenv("MLFLOW_TRACKING_URI")
-    if tracking_uri:
-        mlflow.set_tracking_uri(tracking_uri)
-
-    active_tracking_uri = mlflow.get_tracking_uri()
-    scheme = urlparse(active_tracking_uri).scheme
-    if scheme not in ("http", "https"):
-        local_store = Path("mlruns").resolve()
-        if scheme != "file":
-            logger.warning(
-                "MLflow tracking URI %s is not HTTP/HTTPS; using local file store at %s.",
-                active_tracking_uri,
-                local_store,
-            )
-            mlflow.set_tracking_uri(f"file:{local_store}")
-    mlflow.set_experiment(model_cfg['name'])
-
 # -----------------------------
 # Main logic
 # -----------------------------
 def main(args):
     # Load config
     with open(args.config, 'r') as f:
-        try:
-            config = yaml.safe_load(f)
-        except yaml.constructor.ConstructorError:
-            logger.warning("Unsafe YAML tags detected in config; falling back to yaml.unsafe_load.")
-            f.seek(0)
-            config = yaml.unsafe_load(f)
+        config = yaml.safe_load(f)
     model_cfg = config['model']
 
-    configure_mlflow(model_cfg, args.mlflow_tracking_uri)
+    if args.mlflow_tracking_uri:
+        MLFLOW_DIR = Path("artifacts/mlflow").resolve()
+        MLFLOW_TRACKING_URI = f"file://{MLFLOW_DIR}"
+
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment("Insurance Price Prediction Experiment")
 
     # Load data
     data = pd.read_csv(args.data)
@@ -105,18 +91,15 @@ def main(args):
     # Use all features except the target variable
     X = data.drop(columns=[target])
     y = data[target]
-    cat_cols = X.select_dtypes(include=["object", "category"]).columns
-    if len(cat_cols) > 0:
-        logger.info("One-hot encoding categorical columns: %s", list(cat_cols))
-        X = pd.get_dummies(X, columns=cat_cols, drop_first=False)
+
+    # Handle categorical/object columns for model compatibility
+    object_cols = X.select_dtypes(include=["object"]).columns.tolist()
+    if object_cols:
+        X = pd.get_dummies(X, columns=object_cols, drop_first=True)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # Get model
-    params = model_cfg.get('parameters', {}) or {}
-    if isinstance(params, dict) and "model" in params:
-        logger.info("Ignoring serialized model object in config parameters.")
-        params = {k: v for k, v in params.items() if k != "model"}
-    model = get_model_instance(model_cfg['best_model'], params)
+    model = get_model_instance(model_cfg['best_model'], model_cfg['parameters'])
 
     # Start MLflow run
     with mlflow.start_run(run_name="final_training"):
@@ -128,7 +111,7 @@ def main(args):
         r2 = float(r2_score(y_test, y_pred))
 
         # Log params and metrics
-        mlflow.log_params(params)
+        mlflow.log_params(model_cfg['parameters'])
         mlflow.log_metrics({'mae': mae, 'r2': r2})
 
         # Log and register model
@@ -136,62 +119,59 @@ def main(args):
         model_name = model_cfg['name']
         model_uri = f"runs:/{mlflow.active_run().info.run_id}/tuned_model"
 
+        logger.info("Registering model to MLflow Model Registry...")
+        client = MlflowClient()
         try:
-            logger.info("Registering model to MLflow Model Registry...")
-            client = MlflowClient()
-            try:
-                client.create_registered_model(model_name)
-            except mlflow.exceptions.RestException:
-                pass  # already exists
+            client.create_registered_model(model_name)
+        except mlflow.exceptions.MlflowException:
+            pass  # already exists
 
-            model_version = client.create_model_version(
-                name=model_name,
-                source=model_uri,
-                run_id=mlflow.active_run().info.run_id
-            )
+        model_version = client.create_model_version(
+            name=model_name,
+            source=model_uri,
+            run_id=mlflow.active_run().info.run_id
+        )
 
-            # Transition model to "Staging"
-            client.transition_model_version_stage(
-                name=model_name,
-                version=model_version.version,
-                stage="Staging"
-            )
+        # Transition model to "Staging"
+        client.transition_model_version_stage(
+            name=model_name,
+            version=model_version.version,
+            stage="Staging"
+        )
 
-            # Add a human-readable description
-            description = (
-                f"Model for predicting insurance charges.\n"
-                f"Algorithm: {model_cfg['best_model']}\n"
-                f"Hyperparameters: {model_cfg['parameters']}\n"
-                f"Features used: All features in the dataset except the target variable\n"
-                f"Target variable: {target}\n"
-                f"Trained on dataset: {args.data}\n"
-                f"Model saved at: {args.models_dir}/trained/{model_name}.pkl\n"
-                f"Performance metrics:\n"
-                f"  - MAE: {mae:.2f}\n"
-                f"  - R²: {r2:.4f}"
-            )
-            client.update_registered_model(name=model_name, description=description)
+        # Add a human-readable description
+        description = (
+            f"Model for predicting insurance charges.\n"
+            f"Algorithm: {model_cfg['best_model']}\n"
+            f"Hyperparameters: {model_cfg['parameters']}\n"
+            f"Features used: All features in the dataset except the target variable\n"
+            f"Target variable: {target}\n"
+            f"Trained on dataset: {args.data}\n"
+            f"Model saved at: {args.models_dir}/trained/{model_name}.pkl\n"
+            f"Performance metrics:\n"
+            f"  - MAE: {mae:.2f}\n"
+            f"  - R²: {r2:.4f}"
+        )
+        client.update_registered_model(name=model_name, description=description)
 
-            # Add tags for better organization
-            client.set_registered_model_tag(model_name, "algorithm", model_cfg['best_model'])
-            client.set_registered_model_tag(model_name, "hyperparameters", str(model_cfg['parameters']))
-            client.set_registered_model_tag(model_name, "features", "All features except target variable")
-            client.set_registered_model_tag(model_name, "target_variable", target)
-            client.set_registered_model_tag(model_name, "training_dataset", args.data)
-            client.set_registered_model_tag(model_name, "model_path", f"{args.models_dir}/trained/{model_name}.pkl")
+        # Add tags for better organization
+        client.set_registered_model_tag(model_name, "algorithm", model_cfg['best_model'])
+        client.set_registered_model_tag(model_name, "hyperparameters", str(model_cfg['parameters']))
+        client.set_registered_model_tag(model_name, "features", "All features except target variable")
+        client.set_registered_model_tag(model_name, "target_variable", target)
+        client.set_registered_model_tag(model_name, "training_dataset", args.data)
+        client.set_registered_model_tag(model_name, "model_path", f"{args.models_dir}/trained/{model_name}.pkl")
 
-            # Add dependency tags
-            deps = {
-                "python_version": platform.python_version(),
-                "scikit_learn_version": sklearn.__version__,
-                "xgboost_version": xgb.__version__,
-                "pandas_version": pd.__version__,
-                "numpy_version": np.__version__,
-            }
-            for k, v in deps.items():
-                client.set_registered_model_tag(model_name, k, v)
-        except mlflow.exceptions.MlflowException as exc:
-            logger.warning("Skipping model registry steps: %s", exc)
+        # Add dependency tags
+        deps = {
+            "python_version": platform.python_version(),
+            "scikit_learn_version": sklearn.__version__,
+            "xgboost_version": xgb.__version__,
+            "pandas_version": pd.__version__,
+            "numpy_version": np.__version__,
+        }
+        for k, v in deps.items():
+            client.set_registered_model_tag(model_name, k, v)
 
         # Save model locally
         trained_dir = Path(args.models_dir) / "trained"
