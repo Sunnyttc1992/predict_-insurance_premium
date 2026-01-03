@@ -90,43 +90,20 @@ def create_preprocessor(df: pd.DataFrame, target_col: str = "charges") -> Column
     logger.info("Creating preprocessor pipeline")
 
     # Define feature groups by dtype
-    categorical_features = (
-        df.select_dtypes(include=["object", "string", "category"])
-          .columns
-          .drop(target_col, errors="ignore")
-          .tolist()
-    )
+    cat_cols = X.select_dtypes(include=["object", "category"]).columns
+    num_cols = X.columns.difference(cat_cols)
 
-    numerical_features = (
-        df.select_dtypes(include=["number", "bool"])
-          .columns
-          .drop(target_col, errors="ignore")
-          .tolist()
-    )
+    logger.info("Numeric features (%d): %s", len(num_cols ), num_cols )
+    logger.info("Categorical features (%d): %s", len(cat_cols), cat_cols)
 
-    logger.info("Numeric features (%d): %s", len(numerical_features), numerical_features)
-    logger.info("Categorical features (%d): %s", len(categorical_features), categorical_features)
-
-    # Preprocessing for numerical features
-    numerical_transformer = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="mean")),
-    ])
-
-    # Preprocessing for categorical features
-    categorical_transformer = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=True)),
-    ])
 
     # Combine preprocessors in a column transformer
     preprocessor = ColumnTransformer(
         transformers=[
-            ("num", numerical_transformer, numerical_features),
-            ("cat", categorical_transformer, categorical_features),
-        ],
-        remainder="drop",
-    )
-
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols),
+        ("num", "passthrough", num_cols),
+    ]
+)
     return preprocessor
 
 

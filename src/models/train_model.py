@@ -87,6 +87,10 @@ def main(args):
     # Use all features except the target variable
     X = data.drop(columns=[target])
     y = data[target]
+    cat_cols = X.select_dtypes(include=["object", "category"]).columns
+    if len(cat_cols) > 0:
+        logger.info("One-hot encoding categorical columns: %s", list(cat_cols))
+        X = pd.get_dummies(X, columns=cat_cols, drop_first=False)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # Get model
