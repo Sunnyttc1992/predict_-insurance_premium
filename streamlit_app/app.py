@@ -1,5 +1,6 @@
 import os
 import time
+from urllib.parse import urlparse
 
 import requests
 import streamlit as st
@@ -14,6 +15,16 @@ def _format_currency(value):
         return f"${float(value):,.2f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _normalize_api_url(value):
+    value = (value or "").strip()
+    if not value:
+        return DEFAULT_API_URL, True
+    parsed = urlparse(value)
+    if not parsed.scheme:
+        return f"http://{value}", False
+    return value, False
 
 
 def main():
@@ -48,7 +59,11 @@ def main():
             "Region",
             options=["southwest", "southeast", "northwest", "northeast"],
         )
-        api_endpoint = st.text_input("API URL", value=DEFAULT_API_URL)
+        api_endpoint = st.text_input(
+            "API URL",
+            value=DEFAULT_API_URL,
+            help="Base URL for the API, e.g. http://localhost:8000",
+        )
 
         predict = st.button("Predict Insurance Premium", use_container_width=True)
 
@@ -63,6 +78,9 @@ def main():
                 "smoker": smoker,
                 "region": region,
             }
+            api_endpoint, used_default = _normalize_api_url(api_endpoint)
+            if used_default:
+                st.info(f"Using default API URL: {api_endpoint}")
             predict_url = f"{api_endpoint.rstrip('/')}/predict"
 
             with st.spinner("Predicting..."):
@@ -70,6 +88,13 @@ def main():
                     response = requests.post(predict_url, json=input_data, timeout=20)
                     response.raise_for_status()
                     prediction = response.json()
+                except requests.exceptions.ConnectionError as exc:
+                    st.error(
+                        "API request failed: connection refused. "
+                        "Check that the API server is running and reachable."
+                    )
+                    st.caption(str(exc))
+                    prediction = None
                 except requests.exceptions.RequestException as exc:
                     st.error(f"API request failed: {exc}")
                     prediction = None
