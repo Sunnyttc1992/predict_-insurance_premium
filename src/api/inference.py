@@ -1,62 +1,137 @@
 import joblib
 import pandas as pd
 from datetime import datetime
-from schemas import HousePredictionRequest, PredictionResponse
+from pathlib import Path
+import yaml
 
-# Load model and preprocessor
-MODEL_PATH = "/workspaces/End_to_end_insurance_price_predection/models/trained/insurance_price_model.pkl"
-PREPROCESSOR_PATH = "models/trained/preprocessor.pkl"
 
-try:
-    model = joblib.load(MODEL_PATH)
-    preprocessor = joblib.load(PREPROCESSOR_PATH)
-except Exception as e:
-    raise RuntimeError(f"Error loading model or preprocessor: {str(e)}")
+# Utility: discover model name from config (fallback to literal name)
+def _discover_paths():
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg_path = repo_root / "configs" / "model_config.yaml"
+    model_name = "insurance_price_model"
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r") as fh:
+                cfg = yaml.safe_load(fh)
+            model_name = cfg.get("model", {}).get("name", model_name)
+        except Exception:
+            # fall back to default name
+            pass
 
-def predict_price(request: HousePredictionRequest) -> PredictionResponse:
+    model_path = repo_root / "models" / "trained" / f"{model_name}.pkl"
+    preprocessor_path = repo_root / "models" / "trained" / "preprocessor.pkl"
+    return str(model_path), str(preprocessor_path)
+
+
+MODEL_PATH, PREPROCESSOR_PATH = _discover_paths()
+
+
+def _load_artifacts():
+    try:
+        model = joblib.load(MODEL_PATH)
+    except Exception as e:
+        raise RuntimeError(f"Error loading model from {MODEL_PATH}: {e}")
+    try:
+        preprocessor = joblib.load(PREPROCESSOR_PATH)
+    except Exception as e:
+        raise RuntimeError(f"Error loading preprocessor from {PREPROCESSOR_PATH}: {e}")
+    return model, preprocessor
+
+
+def _add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add the same derived features as `src/features/feature_engineer.py`.
+
+    Expected base columns (from insurance dataset): `age`, `sex`, `bmi`, `children`, `smoker`, `region`.
     """
-    Predict house price based on input features.
+    df = df.copy()
+
+    # Age group buckets
+    try:
+        df["age_group"] = pd.cut(
+            df["age"], bins=[0, 25, 35, 45, 55, 65, 100],
+            labels=["<25", "25-34", "35-44", "45-54", "55-64", "65+"],
+        )
+    except KeyError:
+        raise KeyError("Input data must contain 'age' column")
+
+    # BMI categories
+    try:
+        df["bmi_category"] = pd.cut(
+            df["bmi"], bins=[0, 18.5, 25, 30, 100],
+            labels=["underweight", "normal", "overweight", "obese"],
+        )
+    except KeyError:
+        raise KeyError("Input data must contain 'bmi' column")
+
+    # Smoker flag
+    if "smoker" not in df.columns:
+        raise KeyError("Input data must contain 'smoker' column")
+    df["is_smoker"] = (df["smoker"] == "yes").astype(int)
+
+    # High BMI indicator
+    df["high_bmi"] = (df.get("bmi", 0) >= 30).astype(int)
+
+    # Interactions
+    df["age_smoker_interaction"] = df.get("age", 0) * df["is_smoker"]
+    df["bmi_smoker_interaction"] = df.get("bmi", 0) * df["is_smoker"]
+
+    # Family size indicators
+    df["family_size"] = df.get("children", 0) + 1
+    df["large_family"] = (df["family_size"] >= 4).astype(int)
+
+    return df
+
+
+def predict_single(input_data: dict) -> dict:
+    """Predict charges for a single input dict.
+
+    Returns a dict with `predicted_price`, `confidence_interval`, and `prediction_time`.
     """
-    # Prepare input data
-    input_data = pd.DataFrame([request.dict()])
-    input_data['house_age'] = datetime.now().year - input_data['year_built']
-    input_data['bed_bath_ratio'] = input_data['bedrooms'] / input_data['bathrooms']
-    input_data['price_per_sqft'] = 0  # Dummy value for compatibility
+    model, preprocessor = _load_artifacts()
 
-    # Preprocess input data
-    processed_features = preprocessor.transform(input_data)
+    df = pd.DataFrame([input_data])
+    df = _add_derived_features(df)
 
-    # Make prediction
-    predicted_price = model.predict(processed_features)[0]
+    # Preprocess and predict
+    X_processed = preprocessor.transform(df)
+    pred = model.predict(X_processed)[0]
+    pred = round(float(pred), 2)
 
-    # Convert numpy.float32 to Python float and round to 2 decimal places
-    predicted_price = round(float(predicted_price), 2)
+    ci = [round(float(pred * 0.9), 2), round(float(pred * 1.1), 2)]
 
-    # Confidence interval (10% range)
-    confidence_interval = [predicted_price * 0.9, predicted_price * 1.1]
+    return {
+        "predicted_price": pred,
+        "confidence_interval": ci,
+        "prediction_time": datetime.now().isoformat(),
+    }
 
-    # Convert confidence interval values to Python float and round to 2 decimal places
-    confidence_interval = [round(float(value), 2) for value in confidence_interval]
 
-    return PredictionResponse(
-        predicted_price=predicted_price,
-        confidence_interval=confidence_interval,
-        features_importance={},
-        prediction_time=datetime.now().isoformat()
-    )
+def predict_batch(input_list: list) -> list:
+    """Predict charges for a list of input dicts or a DataFrame-like list.
 
-def batch_predict(requests: list[HousePredictionRequest]) -> list[float]:
+    Returns list of numeric predictions.
     """
-    Perform batch predictions.
-    """
-    input_data = pd.DataFrame([req.dict() for req in requests])
-    input_data['house_age'] = datetime.now().year - input_data['year_built']
-    input_data['bed_bath_ratio'] = input_data['bedrooms'] / input_data['bathrooms']
-    input_data['price_per_sqft'] = 0  # Dummy value for compatibility
+    model, preprocessor = _load_artifacts()
+    if isinstance(input_list, pd.DataFrame):
+        df = input_list
+    else:
+        df = pd.DataFrame(input_list)
 
-    # Preprocess input data
-    processed_features = preprocessor.transform(input_data)
+    df = _add_derived_features(df)
+    X_processed = preprocessor.transform(df)
+    preds = model.predict(X_processed)
+    return [round(float(p), 2) for p in preds.tolist()]
 
-    # Make predictions
-    predictions = model.predict(processed_features)
-    return predictions.tolist()
+
+if __name__ == "__main__":
+    # Quick local demo (will raise informative errors if artifacts missing)
+    example = {
+        "age": 29,
+        "sex": "female",
+        "bmi": 26.2,
+        "children": 0,
+        "smoker": "no",
+        "region": "southeast",
+    }
+    print(predict_single(example))

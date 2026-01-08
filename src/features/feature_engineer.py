@@ -130,10 +130,10 @@ def run_feature_engineering(input_file, output_file, preprocessor_file):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Feature engineering for housing data.')
+    parser = argparse.ArgumentParser(description='Feature engineering for insurance.')
     parser.add_argument("--input", default="data/processed/clean_insurance.csv")
     parser.add_argument("--output", default="data/processed/featured.csv")
-    parser.add_argument("--preprocessor", default="artifacts/preprocessor.pkl")
+    parser.add_argument("--preprocessor", default="models/trained/preprocessor.pkl")
     
     args = parser.parse_args()
     
