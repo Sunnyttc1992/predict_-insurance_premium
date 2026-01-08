@@ -59,11 +59,7 @@ def main():
             "Region",
             options=["southwest", "southeast", "northwest", "northeast"],
         )
-        api_endpoint = st.text_input(
-            "API URL",
-            value=DEFAULT_API_URL,
-            help="Base URL for the API, e.g. http://localhost:8000",
-        )
+        
 
         predict = st.button("Predict Insurance Premium", use_container_width=True)
 
